@@ -5,7 +5,8 @@
 /esp-idf/
 # Firmware: repo rieng (github.com/78/xiaozhi-esp32). Thay doi firmware phai
 # commit ben trong xiaozhi-esp32; repo nay chi luu duoc con tro, khong luu noi dung.
-/xiaozhi-esp32/
+
+
 
 # --- Bi mat: token bot Telegram va chat ID nam trong sdkconfig ---
 sdkconfig
