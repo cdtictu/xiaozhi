@@ -1,0 +1,23 @@
+{
+    // Chi dung project xiaozhi-esp32; esp-idf/ la framework, khong phai project rieng
+    "cmake.sourceDirectory": "${workspaceFolder}/xiaozhi-esp32",
+    // ESP-IDF phai build bang idf.py (xz.sh), khong de CMake Tools tu configure
+    // vao build/ vi se ghi de cau hinh cua idf.py
+    "cmake.configureOnOpen": false,
+    "cmake.automaticReconfigure": false,
+    "cmake.buildDirectory": "${workspaceFolder}/xiaozhi-esp32/build-cmake-tools",
+
+    // IntelliSense doc dung flag/include tu lan build idf.py gan nhat
+    "C_Cpp.default.compileCommands": "${workspaceFolder}/xiaozhi-esp32/build/compile_commands.json",
+
+    "files.watcherExclude": {
+        "**/build/**": true,
+        "**/managed_components/**": true,
+        "**/esp-idf/**": true
+    },
+    "search.exclude": {
+        "**/build": true,
+        "**/managed_components": true,
+        "esp-idf": true
+    }
+}

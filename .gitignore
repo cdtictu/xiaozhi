@@ -1,0 +1,41 @@
+# Git ignore cho workspace ~/xiaozhi
+
+# --- Repo long nhau: moi thu muc co git rieng ---
+# ESP-IDF: framework, tai lai duoc tu github.com/espressif/esp-idf
+/esp-idf/
+# Firmware: repo rieng (github.com/78/xiaozhi-esp32). Thay doi firmware phai
+# commit ben trong xiaozhi-esp32; repo nay chi luu duoc con tro, khong luu noi dung.
+/xiaozhi-esp32/
+
+# --- Bi mat: token bot Telegram va chat ID nam trong sdkconfig ---
+sdkconfig
+sdkconfig.old
+.env
+*.env
+
+# --- File lon / du lieu ca nhan ---
+# Nhac: MP3 goc (co file > 100 MB, GitHub tu choi) va .ogg do music_server.py tao ra
+/music/
+# Ban dump flash cu: vung NVS co the chua mat khau Wi-Fi
+/backup/
+*.bin
+
+# --- Emoji: giu GIF tuy bien, bo ban goc sao luu ---
+*.orig
+
+# --- Python ---
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# --- Build ---
+build/
+
+# --- Editor / he dieu hanh ---
+.vscode/*
+!.vscode/settings.json
+.DS_Store
+Thumbs.db
+*.swp
+*~
