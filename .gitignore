@@ -40,3 +40,12 @@ build/
 Thumbs.db
 *.swp
 *~
+
+# Ban nho: chi theo doi script va tai lieu, khong theo doi ban clone firmware
+/xiaozhi_nho/xiaozhi-esp32/
+
+# Log chay may chu nhac
+*.out.log
+
+# Cau hinh build luu tru trong firmware/ thi van theo doi (da xoa token)
+!firmware/*/sdkconfig

@@ -30,6 +30,8 @@ import threading
 import time
 import unicodedata
 import urllib.request
+import uuid
+from collections import deque
 from pathlib import Path
 
 MUSIC_DIR = Path.home() / "xiaozhi" / "music"
@@ -43,10 +45,14 @@ FORMAT_EXTS = {"mp3": ".mp3", "flac": ".flac", "wav": ".wav", "ogg": ".ogg", "aa
                "matroska,webm": ".webm", "mov,mp4,m4a,3gp,3g2,mj2": ".m4a", "asf": ".wma"}
 DEMO_FILE = "am-thanh-thu.ogg"
 SCAN_INTERVAL_S = 10
+VENV_YTDLP = Path.home() / "xiaozhi" / ".venv" / "bin" / "yt-dlp"
+STREAM_TTL_S = 120  # Link /stream/<id>.ogg khong ai lay thi bo sau ngan nay giay
 
 DEMO = False
 WARNED = set()
 LIBRARY_LOCK = threading.Lock()  # Rescan thread and Telegram uploads both rebuild
+STREAMS = {}  # stream_id -> LiveStream dang chay nen, cho ESP den lay
+STREAMS_LOCK = threading.Lock()
 
 
 def slugify(name):
@@ -189,6 +195,229 @@ def _build_library():
     return songs
 
 
+def ytdlp_path():
+    """yt-dlp tu he thong, hoac tu moi truong ao ~/xiaozhi/.venv."""
+    found = shutil.which("yt-dlp")
+    if found:
+        return found
+    return str(VENV_YTDLP) if VENV_YTDLP.exists() else None
+
+
+def fetch_from_youtube(target):
+    """Tai tieng tu YouTube. target = link, hoac "ytsearch1:<tu khoa>".
+
+    Tra ve (ten bai, loi). Mot trong hai la None.
+    """
+    tool = ytdlp_path()
+    if tool is None:
+        return None, "Máy tính chưa cài yt-dlp (~/xiaozhi/.venv/bin/pip install yt-dlp)"
+    print(f"  tai tu YouTube: {target}", flush=True)
+    template = str(MUSIC_DIR / "%(title)s.%(ext)s")
+    try:
+        result = subprocess.run(
+            [tool, "--no-playlist", "--no-progress", "-f", "bestaudio/best",
+             "-o", template, "--print", "after_move:filepath", target],
+            capture_output=True, text=True, timeout=900)
+    except subprocess.SubprocessError as error:
+        return None, f"Tải thất bại ({error.__class__.__name__})"
+    if result.returncode != 0:
+        last = (result.stderr.strip().splitlines() or ["khong ro loi"])[-1]
+        return None, "Tải thất bại: " + last[:200]
+
+    downloaded = result.stdout.strip().splitlines()
+    if not downloaded:
+        return None, "yt-dlp không cho biết tên file đã tải"
+    return unicodedata.normalize("NFC", Path(downloaded[-1]).stem), None
+
+
+class LiveStream:
+    """Mot ban tai+doi YouTube dang chay nen, ESP se den lay qua /stream/<id>.ogg.
+
+    Du lieu Opus doi ra duoc giu het trong self.chunks (bai nhac chi vai tram KB)
+    de dau tien mot GET den som hay muon van phat duoc tu dau, khong mat khuc nao.
+    """
+
+    def __init__(self, yt_proc, ffmpeg_proc):
+        self.yt_proc = yt_proc
+        self.ffmpeg_proc = ffmpeg_proc
+        self.chunks = []
+        self.finished = False
+        self.error = None
+        self.created = time.time()
+        self.condition = threading.Condition()
+
+    def add_chunk(self, data):
+        with self.condition:
+            self.chunks.append(data)
+            self.condition.notify_all()
+
+    def finish(self, error):
+        with self.condition:
+            self.finished = True
+            self.error = error
+            self.condition.notify_all()
+
+    def iter_chunks(self):
+        """Tra ve tung khuc theo thu tu, cho khuc moi toi khi nao con dang chay nen."""
+        index = 0
+        while True:
+            with self.condition:
+                while index >= len(self.chunks) and not self.finished:
+                    self.condition.wait(timeout=30)
+                pending = self.chunks[index:]
+                index += len(pending)
+                done = self.finished
+            yield from pending
+            if done and index >= len(self.chunks):
+                return
+
+    def abandon(self):
+        """Khong ai lay bai nay (het han hoac ESP dung giua chung): dung tien trinh cho khoi phi."""
+        for proc in (self.yt_proc, self.ffmpeg_proc):
+            if proc.poll() is None:
+                proc.kill()
+
+
+def register_stream(live):
+    with STREAMS_LOCK:
+        now = time.time()
+        for key, value in list(STREAMS.items()):
+            if now - value.created > STREAM_TTL_S:
+                value.abandon()
+                del STREAMS[key]
+        stream_id = uuid.uuid4().hex[:16]
+        STREAMS[stream_id] = live
+    return stream_id
+
+
+def claim_stream(stream_id):
+    with STREAMS_LOCK:
+        return STREAMS.pop(stream_id, None)
+
+
+def _drain_stderr(proc, keep):
+    """Doc va bo stderr lien tuc: khong ai doc thi pipe day se lam tien trinh treo."""
+    try:
+        for line in proc.stderr:
+            keep.append(line)
+    except (OSError, ValueError):
+        pass
+
+
+def _pump_stream(live, cache_file, cache_tmp, cache_path, title):
+    """Chay nen: keo du lieu Opus tu ffmpeg vao live.chunks, dong thoi ghi cache."""
+    try:
+        while True:
+            chunk = live.ffmpeg_proc.stdout.read(65536)
+            if not chunk:
+                break
+            live.add_chunk(chunk)
+            if cache_file is not None:
+                try:
+                    cache_file.write(chunk)
+                except OSError:
+                    cache_file.close()
+                    cache_file = None
+    finally:
+        returncode = live.ffmpeg_proc.wait()
+        live.yt_proc.wait()
+        error = None if returncode == 0 and live.chunks else "Chuyển đổi từ YouTube thất bại"
+        if cache_file is not None:
+            cache_file.close()
+            if error is None:
+                cache_tmp.replace(cache_path)
+                names = load_names()
+                names[cache_path.stem] = title
+                save_names(names)
+            else:
+                cache_tmp.unlink(missing_ok=True)
+        live.finish(error)
+
+
+def start_stream(target):
+    """Bat dau tai+doi YouTube ngay (chay nen), tra ve (stream_id, ten bai) hoac (None, loi).
+
+    Khac fetch_from_youtube(): khong cho ca bai tai+doi xong moi tra loi, ma tra loi
+    ngay khi biet ten bai (thuong vai giay) roi ESP lay du lieu dan qua /stream/<id>.ogg
+    trong luc tien trinh nen van dang tai tiep — giam do tre tu 30-60 giay xuong con vai giay.
+    """
+    tool = ytdlp_path()
+    ffmpeg = shutil.which("ffmpeg")
+    if tool is None:
+        return None, "Máy tính chưa cài yt-dlp (~/xiaozhi/.venv/bin/pip install yt-dlp)"
+    if ffmpeg is None:
+        return None, "Máy tính chưa cài ffmpeg (sudo apt install ffmpeg)"
+
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    title_file = OUT_DIR / f".title-{uuid.uuid4().hex}.tmp"
+    print(f"  phat truc tiep tu YouTube: {target}", flush=True)
+    try:
+        yt_proc = subprocess.Popen(
+            [tool, "--no-playlist", "--no-progress", "-f", "bestaudio/best",
+             "--print-to-file", "%(title)s", str(title_file), "-o", "-", target],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except OSError as error:
+        return None, f"Không chạy được yt-dlp ({error.__class__.__name__})"
+    ffmpeg_proc = subprocess.Popen(
+        [ffmpeg, "-y", "-loglevel", "error", "-i", "pipe:0", "-vn", "-map_metadata", "-1",
+         "-c:a", "libopus", "-b:a", "32k", "-ac", "1", "-ar", "24000",
+         "-frame_duration", "60", "-application", "audio", "-f", "ogg", "pipe:1"],
+        stdin=yt_proc.stdout, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    yt_proc.stdout.close()
+    live = LiveStream(yt_proc, ffmpeg_proc)
+    yt_stderr = deque(maxlen=50)
+    threading.Thread(target=_drain_stderr, args=(yt_proc, yt_stderr), daemon=True).start()
+    threading.Thread(target=_drain_stderr, args=(ffmpeg_proc, deque(maxlen=50)), daemon=True).start()
+
+    # yt-dlp ghi ten bai ra file nay rat som, truoc khi tai xong ca bai: doi toi da ~15 giay
+    title = None
+    for _ in range(150):
+        if title_file.exists():
+            try:
+                title = unicodedata.normalize("NFC", title_file.read_text(encoding="utf-8").strip())
+            except OSError:
+                title = None
+            if title:
+                break
+        if yt_proc.poll() is not None and ffmpeg_proc.poll() is not None:
+            break  # Tien trinh da thoat som (vd link sai, video rieng tu) truoc khi kip ghi ten
+        time.sleep(0.1)
+    title_file.unlink(missing_ok=True)
+
+    if not title:
+        if yt_proc.poll() is not None and yt_proc.returncode != 0:
+            ffmpeg_proc.kill()
+            last = yt_stderr[-1].decode(errors="replace").strip()[:200] if yt_stderr else "không rõ lỗi"
+            return None, "Không tải được từ YouTube: " + last
+        title = "Bài hát YouTube"  # Chua kip biet ten nhung tien trinh van dang chay binh thuong
+
+    cache_path = unique_path(OUT_DIR, slugify(title), ".ogg")
+    cache_tmp = cache_path.with_name(cache_path.name + ".part")
+    try:
+        cache_file = open(cache_tmp, "wb")
+    except OSError:
+        cache_file = None
+
+    threading.Thread(target=_pump_stream, args=(live, cache_file, cache_tmp, cache_path, title),
+                     daemon=True).start()
+    stream_id = register_stream(live)
+    return stream_id, title
+
+
+def add_from_youtube(target):
+    """Ban chay nen: tai xong thi nhan tin Telegram bao so thu tu bai."""
+    name, error = fetch_from_youtube(target)
+    if error is not None:
+        notify("❌ " + error)
+        return
+    songs = build_library()
+    for number, song in enumerate(songs, 1):
+        if song["name"] == name:
+            notify(f"✅ Đã thêm “{name}” — bài số {number}.\nPhát: /nhac {number}")
+            return
+    notify("⚠️ Đã tải xong nhưng chưa thấy bài trong danh sách. Xem log máy chủ nhạc.")
+
+
 def telegram_config():
     """Bot token and owner chat ID, from the firmware sdkconfig or the environment."""
     values = {}
@@ -264,7 +493,83 @@ class MusicHandler(http.server.SimpleHTTPRequestHandler):
         except (ConnectionResetError, BrokenPipeError):
             pass  # The ESP stopped the song and closed the stream
 
+    def do_GET(self):
+        match = re.fullmatch(r"stream/([0-9a-f]{16})\.ogg", self.path.lstrip("/"))
+        if match:
+            self.handle_stream(match.group(1))
+            return
+        super().do_GET()
+
+    def handle_stream(self, stream_id):
+        """Phat truc tiep tu mot LiveStream dang tai nen (khong phai file tinh)."""
+        live = claim_stream(stream_id)
+        if live is None:
+            self.send_error(404, "Lien ket phat da het han hoac da dung")
+            return
+        if live.finished and live.error and not live.chunks:
+            self.send_error(502, live.error)
+            return
+
+        self.send_response(200)
+        self.send_header("Content-Type", "audio/ogg")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        try:
+            for chunk in live.iter_chunks():
+                self.wfile.write(f"{len(chunk):X}\r\n".encode())
+                self.wfile.write(chunk)
+                self.wfile.write(b"\r\n")
+            self.wfile.write(b"0\r\n\r\n")
+        except (ConnectionResetError, BrokenPipeError):
+            live.abandon()  # ESP dung phat giua chung: dung tien trinh nen cho khoi phi
+
+    def handle_youtube(self):
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            data = json.loads(self.rfile.read(min(length, 4096)) or b"{}")
+            url = str(data.get("url") or "")
+            query = str(data.get("query") or "")
+            wait = bool(data.get("wait"))
+        except (ValueError, TypeError):
+            self.send_error(400)
+            return
+
+        if url:
+            # Chi nhan link YouTube, tranh bien may chu thanh cong cu tai bat ky dau
+            if not re.match(r"^https://(www\.|music\.|m\.)?(youtube\.com|youtu\.be)/[\w\-?=&/.%]+$", url):
+                self.send_error(400)
+                return
+            target = url
+        elif query:
+            target = "ytsearch1:" + query.replace("\n", " ")[:200]
+        else:
+            self.send_error(400)
+            return
+
+        if not wait:
+            threading.Thread(target=add_from_youtube, args=(target,), daemon=True).start()
+            self.send_response(202)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+
+        # Che do cho: bat dau tai+doi nen ngay, tra ve link /stream/<id>.ogg de ESP
+        # phat ngay trong luc con dang tai tiep, khong cho ca bai xong nhu truoc
+        stream_id, result = start_stream(target)
+        match = {"name": result, "file": f"stream/{stream_id}.ogg"} if stream_id else None
+        error = None if stream_id else result
+        body = json.dumps(match if error is None else {"error": error},
+                          ensure_ascii=False).encode()
+        self.send_response(200 if error is None else 502)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_POST(self):
+        if self.path == "/youtube":
+            self.handle_youtube()
+            return
         if self.path != "/add":
             self.send_error(404)
             return
@@ -327,7 +632,11 @@ def main():
 
     handler = functools.partial(MusicHandler, directory=str(OUT_DIR))
     with http.server.ThreadingHTTPServer(("0.0.0.0", args.port), handler) as httpd:
-        print(f"\nMay chu nhac: http://{lan_ip()}:{args.port}/   (Ctrl+C de dung)", flush=True)
+        url = f"http://{lan_ip()}:{args.port}/"
+        # IP may tinh hay doi theo DHCP: bao dia chi moi qua Telegram cho khoi phai do
+        notify(f"🖥 Máy chủ nhạc đã chạy: {url}\nNếu ESP báo không kết nối được, nhắn:\n"
+               f"/nhac server {url}")
+        print(f"\nMay chu nhac: {url}   (Ctrl+C de dung)", flush=True)
         print(f"Bo file nhac vao {MUSIC_DIR} la tu co trong danh sach.", flush=True)
         httpd.serve_forever()
 

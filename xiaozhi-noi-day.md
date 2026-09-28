@@ -115,8 +115,10 @@ Chỉ chat ID chủ (5835460689) mới ra lệnh được. Token và chat ID n�
 | /phude on\|off | bật / tắt chữ hội thoại dưới biểu cảm (thông báo hệ thống vẫn hiện) |
 | /theodoi on\|off | chuyển tiếp mọi câu hội thoại về Telegram |
 | /nhac, /nhac <số\|tên>, /nhac dung | danh sách / phát / dừng nhạc từ máy tính (mục 12) |
+| /nhac ytb <link> | tải tiếng một video YouTube về máy tính rồi thêm vào danh sách |
 | /nhac server <url> | đổi địa chỉ máy chủ nhạc khi IP máy tính thay đổi |
 | /dichuyen tien\|lui\|trai\|phai\|dung [giây] [tốc độ] | chạy robot (bản có động cơ), vd `/dichuyen tien 1.5 80` |
+| /wifi doi | vào chế độ cấu hình Wi-Fi từ xa, khỏi phải giữ nút BOOT (bot sẽ mất kết nối) |
 | /reboot | khởi động lại |
 
 Thêm/bớt lệnh: sửa hàm `RegisterCommands()` trong
@@ -178,10 +180,16 @@ Bread Compact Wi-Fi + LCD + Camera Options → TC1508A dual DC motor driver.
    `python3 ~/xiaozhi/music_server.py`
    File mới bỏ vào thư mục tự có trong danh sách sau khoảng 10 giây.
 4. Phát nhạc:
-   - Nói: "có những bài nào", "mở bài ...", "tắt nhạc"
+   - Nói: "có những bài nào", "mở bài ...", "tắt nhạc".
+     Bài **không có trong thư viện** sẽ được tự tìm trên YouTube, tải về rồi phát
+     (lần đầu chờ khoảng 30-60 giây; máy lấy kết quả đầu tiên YouTube trả về)
    - Telegram: `/nhac` (danh sách), `/nhac 2`, `/nhac <tên bài>`, `/nhac dung`
    - Đang phát: bấm BOOT hoặc gọi wake word để dừng.
-5. Thêm bài từ điện thoại: gửi file nhạc (mp3, m4a... tối đa 20 MB) cho @Xiaozhi0_bot.
+5. Thêm bài từ YouTube: `/nhac ytb <link>`. Máy tính tải tiếng bằng `yt-dlp`
+   (đã cài sẵn ở `~/xiaozhi/.venv`), đổi sang Opus rồi bot nhắn "Đã thêm … — bài số N".
+   **Chỉ dùng cho máy cá nhân.** Điều khoản YouTube cấm tải tiếng ra khỏi ứng dụng của họ,
+   nên không đưa tính năng này vào sản phẩm đem bán.
+6. Thêm bài từ điện thoại: gửi file nhạc (mp3, m4a... tối đa 20 MB) cho @Xiaozhi0_bot.
    Chú thích (caption) của tin nhắn sẽ là tên bài; không có thì lấy tên file.
    Máy tính tải về `~/xiaozhi/music`, đổi sang Opus rồi bot nhắn "Đã thêm … — bài số N".
    Máy tính phải đang chạy music_server.py và đã cài ffmpeg.
@@ -218,3 +226,19 @@ rồi `xz.sh build && xz.sh flash`. Đổi điện trở khác thì sửa 2 giá
 
 GPIO 3 dùng chung với chân IN3 của mạch động cơ TC1508A, nên **chỉ bật được một
 trong hai**. Bật cả hai thì build sẽ báo lỗi rõ ràng.
+
+## 14. Sự cố đã gặp và cách sửa
+
+**Build báo "Missing required kconfig option after retry"** (xuất hiện 24/09):
+trình quản lý component tải thông tin gói mới từ máy chủ, gặp gói `esp_h264` xét
+điều kiện theo biến `ESP_VIDEO_USE_CUSTOMIZED_ESP_H264_VERSION` mà không file
+Kconfig nào định nghĩa, nên lặp rồi hỏng. Không liên quan tới code của mình.
+Đã sửa bằng cách khai báo biến đó trong `main/Kconfig.projbuild` (mặc định tắt).
+Nếu sau này gặp lại với biến khác, làm y như vậy: khai báo biến thiếu, có nhãn
+hiển thị chứ đừng để ẩn, vì biến ẩn không lọt vào file cấu hình mà trình quản lý đọc.
+
+**Nạp firmware đứt giữa chừng**: cổng USB rớt, thường do cáp kém hoặc cắm qua hub.
+Dùng cáp dữ liệu ngắn, cắm thẳng vào máy. Nạp lại ở tốc độ thấp hơn nếu cần:
+`idf.py -p <cổng> -b 115200 flash`.
+
+**`monitor` đang mở thì không nạp được**: đóng cửa sổ `xz.sh monitor` trước khi nạp.

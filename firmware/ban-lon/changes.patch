@@ -1,0 +1,774 @@
+diff --git a/main/CMakeLists.txt b/main/CMakeLists.txt
+index 08df008..0e9cece 100644
+--- a/main/CMakeLists.txt
++++ b/main/CMakeLists.txt
+@@ -786,6 +786,10 @@ elseif(CONFIG_BOARD_TYPE_ELECTRON_BOT)
+     set(DEFAULT_EMOJI_COLLECTION otto-gif)
+ elseif(CONFIG_BOARD_TYPE_BREAD_COMPACT_WIFI_CAM)
+     set(BOARD_DIR "bread-compact-wifi-s3cam")
++    # Report the motor variant under its own name when built without scripts/build.py
++    if(CONFIG_S3CAM_TC1508A_MOTOR AND NOT BOARD_NAME)
++        set(BOARD_NAME "bread-compact-wifi-s3cam-motor")
++    endif()
+     set(BUILTIN_TEXT_FONT font_noto_sans_basic_16_4)
+     set(BUILTIN_ICON_FONT font_material_symbols_16_4)
+     set(DEFAULT_EMOJI_COLLECTION noto-color-emoji_64)
+@@ -1052,6 +1056,14 @@ if(CONFIG_IDF_TARGET_ESP32S3)
+     list(APPEND SOURCES "boards/common/esp32_camera.cc")
+ endif()
+ 
++if(CONFIG_TELEGRAM_BOT_ENABLE)
++    list(APPEND SOURCES "telegram/telegram_bot.cc")
++endif()
++
++if(CONFIG_MUSIC_PLAYER_ENABLE)
++    list(APPEND SOURCES "music/music_library.cc")
++endif()
++
+ set(MAIN_PRIV_REQUIRES_EXTRA "")
+ if(BOARD_TYPE STREQUAL "m5stack-stick-s3")
+     list(APPEND MAIN_PRIV_REQUIRES_EXTRA
+@@ -1291,8 +1303,13 @@ function(build_default_assets_bin)
+         endif()
+     endif()
+ 
++    # A custom emoji directory from Kconfig overrides the board's collection
++    if(CONFIG_DEFAULT_ASSETS_EMOJI_DIR)
++        list(APPEND BUILD_ARGS "--emoji_collection" "${CONFIG_DEFAULT_ASSETS_EMOJI_DIR}")
++        file(GLOB CUSTOM_EMOJI_FILES CONFIGURE_DEPENDS "${CONFIG_DEFAULT_ASSETS_EMOJI_DIR}/*")
++        list(APPEND DEFAULT_ASSETS_DEPENDENCIES ${CUSTOM_EMOJI_FILES})
+     # Add default emoji collection if defined
+-    if(DEFAULT_EMOJI_COLLECTION)
++    elseif(DEFAULT_EMOJI_COLLECTION)
+         list(APPEND BUILD_ARGS "--emoji_collection" "${DEFAULT_EMOJI_COLLECTION}")
+         file(GLOB DEFAULT_EMOJI_FILES CONFIGURE_DEPENDS
+             "${NOTO_FONTS_PATH}/png/${DEFAULT_EMOJI_COLLECTION}/*"
+diff --git a/main/Kconfig.projbuild b/main/Kconfig.projbuild
+index 8d5ae70..99d4318 100644
+--- a/main/Kconfig.projbuild
++++ b/main/Kconfig.projbuild
+@@ -33,6 +33,15 @@ config CUSTOM_ASSETS_FILE
+         The custom assets file to flash.
+         It can be a local file relative to the project directory or a remote url.
+ 
++config DEFAULT_ASSETS_EMOJI_DIR
++    depends on FLASH_DEFAULT_ASSETS
++    string "Custom Emoji Directory"
++    default ""
++    help
++        Absolute path to a directory of <emotion>.png / <emotion>.gif files
++        (neutral, happy, sad, thinking, ...) packed into the default assets
++        instead of the board's emoji collection. Leave empty to keep the board default.
++
+ choice
+     prompt "Default Language"
+     default LANGUAGE_ZH_CN
+@@ -1013,6 +1022,48 @@ config RECEIVE_CUSTOM_MESSAGE
+     help
+         Enable custom message reception, allow the device to receive custom messages from the server (preferably through the MQTT protocol)
+ 
++menu "Telegram Bot"
++    config TELEGRAM_BOT_ENABLE
++        bool "Enable Telegram bot"
++        default n
++        help
++            Long-poll a Telegram bot so its owner can monitor and control the device:
++            status, text questions, screen alerts, photos, volume, brightness,
++            conversation forwarding and reboot.
++
++    config TELEGRAM_BOT_TOKEN
++        string "Bot token"
++        default ""
++        depends on TELEGRAM_BOT_ENABLE
++        help
++            Token from @BotFather. Anyone holding it can read the bot's messages.
++
++    config TELEGRAM_CHAT_ID
++        string "Owner chat ID"
++        default ""
++        depends on TELEGRAM_BOT_ENABLE
++        help
++            Only this chat may run commands. Leave it empty and send /start to the
++            bot: it replies with your chat ID.
++endmenu
++
++menu "Music Player"
++    config MUSIC_PLAYER_ENABLE
++        bool "Play songs from a LAN music server"
++        default n
++        help
++            Stream Ogg/Opus songs from a small HTTP server that serves index.json
++            and the song files, through the self.music.* MCP tools and, with the
++            Telegram bot, the /nhac command.
++
++    config MUSIC_SERVER_URL
++        string "Music server URL"
++        default "http://192.168.1.100:8080/"
++        depends on MUSIC_PLAYER_ENABLE
++        help
++            Base URL that serves index.json and the .ogg files.
++endmenu
++
+ menu "Camera Configuration"
+     depends on !IDF_TARGET_ESP32
+ 
+@@ -1134,4 +1185,41 @@ menu "TAIJIPAI_S3_CONFIG"
+         启动双声道
+ endmenu
+ 
++menu "Bread Compact Wi-Fi + LCD + Camera Options"
++    depends on BOARD_TYPE_BREAD_COMPACT_WIFI_CAM
++    config S3CAM_TC1508A_MOTOR
++        bool "TC1508A dual DC motor driver"
++        default n
++        help
++            Drive two wheels through a TC1508A H-bridge: left motor on GPIO14/21,
++            right motor on GPIO3/46. GPIO21 is taken from the display RESET line,
++            so wire display RESET to 3V3; the panel is then reset by software.
++
++    config S3CAM_BATTERY_ADC
++        bool "Battery level on GPIO3 (ADC1)"
++        default n
++        help
++            Show the battery icon in the status bar. Needs a voltage divider:
++            battery + -> upper resistor -> GPIO3 -> lower resistor -> GND, and a
++            common ground with the board. GPIO3 is the only free ADC1 pin, so this
++            cannot be combined with the TC1508A driver, which uses GPIO3 as IN3.
++
++    config S3CAM_BATTERY_UPPER_RESISTOR
++        int "Upper resistor in kOhm (battery + to GPIO3)"
++        default 100
++        depends on S3CAM_BATTERY_ADC
++
++    config S3CAM_BATTERY_LOWER_RESISTOR
++        int "Lower resistor in kOhm (GPIO3 to GND)"
++        default 100
++        depends on S3CAM_BATTERY_ADC
++endmenu
++
+ endmenu
++
++# Goi espressif/esp_h264 xet dieu kien theo bien nay trong manifest, nhung khong
++# component nao dinh nghia no. Trinh quan ly component vi the bao "missing kconfig
++# option" va build hong han. Khai bao an o day de pha vong lap.
++config ESP_VIDEO_USE_CUSTOMIZED_ESP_H264_VERSION
++    bool "Use customized esp_h264 version (leave off)"
++    default n
+diff --git a/main/application.cc b/main/application.cc
+index f3f4a68..8477635 100644
+--- a/main/application.cc
++++ b/main/application.cc
+@@ -10,6 +10,12 @@
+ #include "system_info.h"
+ #include "text_glyph_payload.h"
+ #include "websocket_protocol.h"
++#if CONFIG_TELEGRAM_BOT_ENABLE
++#include "telegram/telegram_bot.h"
++#endif
++#if CONFIG_MUSIC_PLAYER_ENABLE
++#include "music/music_library.h"
++#endif
+ 
+ #include <driver/gpio.h>
+ #include <esp_log.h>
+@@ -20,6 +26,78 @@
+ 
+ #define TAG "Application"
+ 
++// StartNotification() only accepts a song when the device is idle and the previous
++// stream has closed, so a pending song is retried for about 30 seconds.
++static constexpr uint64_t kPendingAudioRetryUs = 200 * 1000;
++static constexpr int kMaxPendingAudioRetries = 150;
++
++void Application::PlayAudioUrl(const std::string& url) {
++    Schedule([this, url]() {
++        pending_audio_url_ = url;
++        pending_audio_retries_ = 0;
++        auto state = GetDeviceState();
++        if (state == kDeviceStateNotifying) {
++            // Replace the current song: the idle handler starts the new one
++            StopNotification();
++        } else if (state == kDeviceStateIdle) {
++            StartPendingAudio();
++        }
++        // In a conversation the listening handler ends it first
++    });
++}
++
++void Application::StopAudioUrl() {
++    Schedule([this]() {
++        pending_audio_url_.clear();
++        if (pending_audio_timer_ != nullptr) {
++            esp_timer_stop(pending_audio_timer_);
++        }
++        // Always stop the player: the stream keeps running even if the state moved on
++        StopNotification();
++    });
++}
++
++void Application::StartPendingAudio() {
++    if (pending_audio_url_.empty()) {
++        return;
++    }
++    // Keep the URL while the device is busy: dropping it would lose the song silently
++    auto retry = [this]() {
++        if (++pending_audio_retries_ > kMaxPendingAudioRetries) {
++            ESP_LOGW(TAG, "Giving up on the pending song: the device stayed busy");
++            pending_audio_url_.clear();
++            return;
++        }
++        if (pending_audio_timer_ == nullptr) {
++            esp_timer_create_args_t args = {
++                .callback =
++                    [](void* arg) {
++                        auto app = static_cast<Application*>(arg);
++                        app->Schedule([app]() { app->StartPendingAudio(); });
++                    },
++                .arg = this,
++                .dispatch_method = ESP_TIMER_TASK,
++                .name = "pending_audio",
++                .skip_unhandled_events = true};
++            esp_timer_create(&args, &pending_audio_timer_);
++        }
++        esp_timer_start_once(pending_audio_timer_, kPendingAudioRetryUs);
++    };
++
++    if (GetDeviceState() != kDeviceStateIdle || notify_player_.IsBusy()) {
++        retry();
++        return;
++    }
++
++    std::string url = pending_audio_url_;
++    StartNotification(url, {});
++    if (GetDeviceState() == kDeviceStateNotifying) {
++        pending_audio_url_.clear();
++    } else {
++        retry();  // Refused after all
++    }
++}
++
+ Application::Application() : notify_player_(audio_service_) {
+     event_group_ = xEventGroupCreate();
+ 
+@@ -104,6 +182,10 @@ void Application::Initialize() {
+     auto& mcp_server = McpServer::GetInstance();
+     mcp_server.AddCommonTools();
+     mcp_server.AddUserOnlyTools();
++#if CONFIG_MUSIC_PLAYER_ENABLE
++    // Before the Telegram bot starts, so /nhac is in its command list
++    MusicLibrary::GetInstance().Initialize();
++#endif
+ 
+     // Set network event callback for UI updates and network state handling
+     board.SetNetworkEventCallback([this](NetworkEvent event, const std::string& data) {
+@@ -359,6 +441,11 @@ void Application::HandleActivationDoneEvent() {
+             audio_service_.PlaySound(Lang::Sounds::OGG_SUCCESS);
+         });
+     }
++
++#if CONFIG_TELEGRAM_BOT_ENABLE
++    // Network is up once activation is done; Start() ignores repeated calls
++    TelegramBot::GetInstance().Start();
++#endif
+ }
+ 
+ void Application::ActivationTask() {
+@@ -644,6 +731,9 @@ void Application::InitializeProtocol() {
+                         glyphs.clear();
+                     }
+                     ESP_LOGI(TAG, "<< %s", text->valuestring);
++#if CONFIG_TELEGRAM_BOT_ENABLE
++                    TelegramBot::GetInstance().OnChatMessage("assistant", text->valuestring);
++#endif
+                     Schedule([display, message = std::string(text->valuestring),
+                               glyphs = std::move(glyphs), bpp]() {
+                         display->AddTextGlyphs(glyphs, bpp);
+@@ -660,6 +750,9 @@ void Application::InitializeProtocol() {
+                     glyphs.clear();
+                 }
+                 ESP_LOGI(TAG, ">> %s", text->valuestring);
++#if CONFIG_TELEGRAM_BOT_ENABLE
++                TelegramBot::GetInstance().OnChatMessage("user", text->valuestring);
++#endif
+                 Schedule([display, message = std::string(text->valuestring),
+                           glyphs = std::move(glyphs), bpp]() {
+                     display->AddTextGlyphs(glyphs, bpp);
+@@ -1013,6 +1106,10 @@ void Application::HandleStateChangedEvent() {
+             }
+             audio_service_.EnableVoiceProcessing(false);
+             audio_service_.EnableWakeWordDetection(true);
++            // A song requested during the conversation starts now that it is over
++            if (!pending_audio_url_.empty()) {
++                Schedule([this]() { StartPendingAudio(); });
++            }
+             break;
+         case kDeviceStateConnecting:
+             display->SetStatus(Lang::Strings::CONNECTING);
+@@ -1020,6 +1117,11 @@ void Application::HandleStateChangedEvent() {
+             display->SetChatMessage("system", "");
+             break;
+         case kDeviceStateListening:
++            // A song is waiting: end the conversation instead of listening again
++            if (!pending_audio_url_.empty() && protocol_ && protocol_->IsAudioChannelOpened()) {
++                protocol_->CloseAudioChannel();
++                break;
++            }
+             display->SetStatus(Lang::Strings::LISTENING);
+             display->SetEmotion("neutral");
+ 
+@@ -1050,6 +1152,9 @@ void Application::HandleStateChangedEvent() {
+             break;
+         case kDeviceStateNotifying:
+             display->SetStatus(Lang::Strings::SPEAKING);
++            // Music (and other notification audio) gets its own emoji; the idle
++            // handler puts "neutral" back when playback ends
++            display->SetEmotion("music");
+             audio_service_.EnableVoiceProcessing(false);
+             audio_service_.EnableWakeWordDetection(audio_service_.IsAfeWakeWord());
+             break;
+diff --git a/main/application.h b/main/application.h
+index f2b9a00..0e1a300 100644
+--- a/main/application.h
++++ b/main/application.h
+@@ -70,7 +70,7 @@ public:
+ 
+     DeviceState GetDeviceState() const { return state_machine_.GetState(); }
+     bool IsVoiceDetected() const { return audio_service_.IsVoiceDetected(); }
+-    
++
+     /**
+      * Request state transition
+      * Returns true if transition was successful
+@@ -118,7 +118,15 @@ public:
+     AecMode GetAecMode() const { return aec_mode_; }
+     void PlaySound(const std::string_view& sound);
+     AudioService& GetAudioService() { return audio_service_; }
+-    
++
++    /**
++     * Stream an Ogg/Opus URL on the speaker, like a server notify message (thread-safe).
++     * During a conversation it starts once the conversation is over; a new URL replaces
++     * the one playing. The button or the wake word stops it.
++     */
++    void PlayAudioUrl(const std::string& url);
++    void StopAudioUrl();
++
+     /**
+      * Reset protocol resources (thread-safe)
+      * Can be called from any task to release resources allocated after network connected
+@@ -142,6 +150,9 @@ private:
+     AudioService audio_service_;
+     NotifyPlayer notify_player_;
+     uint32_t notification_playback_id_ = 0;
++    std::string pending_audio_url_;  // Set by PlayAudioUrl(); main task only
++    esp_timer_handle_t pending_audio_timer_ = nullptr;
++    int pending_audio_retries_ = 0;
+     std::unique_ptr<Ota> ota_;
+ 
+     std::function<void(const std::string&)> mcp_broadcast_callback_;
+@@ -172,6 +183,7 @@ private:
+     void StartNotification(std::string audio_url, std::vector<NotifySubtitle> subtitles);
+     void StopNotification();
+     void HandleNotificationFinished(uint32_t playback_id, bool success);
++    void StartPendingAudio();
+ 
+     // Activation task (runs in background)
+     void ActivationTask();
+@@ -183,7 +195,7 @@ private:
+     void ShowActivationCode(const std::string& code, const std::string& message);
+     void SetListeningMode(ListeningMode mode);
+     ListeningMode GetDefaultListeningMode() const;
+-    
++
+     // State change handler called by state machine
+     void OnStateChanged(DeviceState old_state, DeviceState new_state);
+ };
+diff --git a/main/boards/bread-compact-wifi-s3cam/compact_wifi_board_s3cam.cc b/main/boards/bread-compact-wifi-s3cam/compact_wifi_board_s3cam.cc
+index a06d0e5..aa5f10c 100644
+--- a/main/boards/bread-compact-wifi-s3cam/compact_wifi_board_s3cam.cc
++++ b/main/boards/bread-compact-wifi-s3cam/compact_wifi_board_s3cam.cc
+@@ -9,6 +9,12 @@
+ #include "lamp_controller.h"
+ #include "led/single_led.h"
+ #include "esp32_camera.h"
++#if CONFIG_S3CAM_TC1508A_MOTOR
++#include "tc1508a_motors.h"
++#endif
++#if CONFIG_S3CAM_BATTERY_ADC
++#include "adc_battery_monitor.h"
++#endif
+ 
+ #include <esp_log.h>
+ #include <driver/i2c_master.h>
+@@ -66,6 +72,9 @@ private:
+     Button boot_button_;
+     LcdDisplay* display_;
+     Esp32Camera* camera_;
++#if CONFIG_S3CAM_BATTERY_ADC
++    AdcBatteryMonitor* battery_monitor_ = nullptr;
++#endif
+ 
+     void InitializeSpi() {
+         spi_bus_config_t buscfg = {};
+@@ -171,6 +180,15 @@ public:
+         InitializeLcdDisplay();
+         InitializeButtons();
+         InitializeCamera();
++#if CONFIG_S3CAM_BATTERY_ADC
++        battery_monitor_ = new AdcBatteryMonitor(BATTERY_ADC_UNIT, BATTERY_ADC_CHANNEL,
++                                                 CONFIG_S3CAM_BATTERY_UPPER_RESISTOR,
++                                                 CONFIG_S3CAM_BATTERY_LOWER_RESISTOR);
++#endif
++#if CONFIG_S3CAM_TC1508A_MOTOR
++        static Tc1508aMotors motors(MOTOR_LEFT_IN1_PIN, MOTOR_LEFT_IN2_PIN, MOTOR_RIGHT_IN3_PIN,
++                                    MOTOR_RIGHT_IN4_PIN);
++#endif
+         if (DISPLAY_BACKLIGHT_PIN != GPIO_NUM_NC) {
+             GetBacklight()->RestoreBrightness();
+         }
+@@ -208,6 +226,18 @@ public:
+     virtual Camera* GetCamera() override {
+         return camera_;
+     }
++
++#if CONFIG_S3CAM_BATTERY_ADC
++    virtual bool GetBatteryLevel(int& level, bool& charging, bool& discharging) override {
++        if (battery_monitor_ == nullptr) {
++            return false;
++        }
++        level = battery_monitor_->GetBatteryLevel();
++        charging = battery_monitor_->IsCharging();
++        discharging = battery_monitor_->IsDischarging();
++        return true;
++    }
++#endif
+ };
+ 
+ DECLARE_BOARD(CompactWifiBoardS3Cam);
+diff --git a/main/boards/bread-compact-wifi-s3cam/config.h b/main/boards/bread-compact-wifi-s3cam/config.h
+index 857d8c0..01d19f2 100644
+--- a/main/boards/bread-compact-wifi-s3cam/config.h
++++ b/main/boards/bread-compact-wifi-s3cam/config.h
+@@ -305,4 +305,27 @@
+ // A MCP Test: Control a lamp
+ #define LAMP_GPIO GPIO_NUM_14
+ 
++// Motor variant: a TC1508A H-bridge takes GPIO14/21/3/46. GPIO21 was the display
++// RESET line: wire display RESET to 3V3, the panel is then reset by software.
++#if CONFIG_S3CAM_TC1508A_MOTOR
++#undef DISPLAY_RST_PIN
++#define DISPLAY_RST_PIN     GPIO_NUM_NC
++#undef LAMP_GPIO
++#define LAMP_GPIO           GPIO_NUM_NC
++#define MOTOR_LEFT_IN1_PIN  GPIO_NUM_14
++#define MOTOR_LEFT_IN2_PIN  GPIO_NUM_21
++#define MOTOR_RIGHT_IN3_PIN GPIO_NUM_3
++#define MOTOR_RIGHT_IN4_PIN GPIO_NUM_46
++#endif
++
++// Battery level on GPIO3 (ADC1 channel 2), read through a voltage divider
++#if CONFIG_S3CAM_BATTERY_ADC
++#if CONFIG_S3CAM_TC1508A_MOTOR
++#error "GPIO3 can drive the TC1508A IN3 or measure the battery, not both"
++#endif
++#include <hal/adc_types.h>
++#define BATTERY_ADC_UNIT    ADC_UNIT_1
++#define BATTERY_ADC_CHANNEL ADC_CHANNEL_2
++#endif
++
+ #endif // _BOARD_CONFIG_H_
+diff --git a/main/boards/bread-compact-wifi-s3cam/config.json b/main/boards/bread-compact-wifi-s3cam/config.json
+index 38a03e8..0db1573 100644
+--- a/main/boards/bread-compact-wifi-s3cam/config.json
++++ b/main/boards/bread-compact-wifi-s3cam/config.json
+@@ -11,6 +11,17 @@
+             "sdkconfig_append": [
+                 "CONFIG_LCD_ST7789_240X320=y"
+             ]
++        },
++        {
++            "name": "bread-compact-wifi-s3cam-motor",
++            "build_options": {
++                "camera_hmirror": false,
++                "camera_vflip": false
++            },
++            "sdkconfig_append": [
++                "CONFIG_LCD_ST7789_240X320=y",
++                "CONFIG_S3CAM_TC1508A_MOTOR=y"
++            ]
+         }
+     ]
+ }
+diff --git a/main/boards/common/board.h b/main/boards/common/board.h
+index 19d3f2f..d55c319 100644
+--- a/main/boards/common/board.h
++++ b/main/boards/common/board.h
+@@ -75,6 +75,8 @@ public:
+     virtual Camera* GetCamera();
+     virtual NetworkInterface* GetNetwork() = 0;
+     virtual void StartNetwork() = 0;
++    // Start network setup (Wi-Fi provisioning) from code; false when the board has none
++    virtual bool StartNetworkConfiguration() { return false; }
+     virtual void SetNetworkEventCallback(NetworkEventCallback callback) { (void)callback; }
+     virtual const char* GetNetworkStateIcon() = 0;
+     virtual bool GetBatteryLevel(int &level, bool& charging, bool& discharging);
+diff --git a/main/boards/common/camera.h b/main/boards/common/camera.h
+index b74bf86..096c886 100644
+--- a/main/boards/common/camera.h
++++ b/main/boards/common/camera.h
+@@ -14,6 +14,10 @@ public:
+     virtual bool SetVFlip(bool enabled) = 0;
+     virtual bool SetSwapBytes(bool enabled) { return false; }  // Optional, default no-op
+     virtual std::expected<std::string, std::string> Explain(const std::string& question) = 0;
++    // Optional: encode the last captured frame as JPEG
++    virtual std::expected<std::string, std::string> GetJpeg(int quality) {
++        return std::unexpected("JPEG export is not supported by this camera");
++    }
+ };
+ 
+ #endif  // CAMERA_H
+diff --git a/main/boards/common/esp32_camera.cc b/main/boards/common/esp32_camera.cc
+index d4d4c9d..7060163 100644
+--- a/main/boards/common/esp32_camera.cc
++++ b/main/boards/common/esp32_camera.cc
+@@ -174,6 +174,64 @@ bool Esp32Camera::SetSwapBytes(bool enabled) {
+     return true;
+ }
+ 
++static bool ToV4l2Format(pixformat_t format, v4l2_pix_fmt_t& out) {
++    switch (format) {
++        case PIXFORMAT_RGB565:
++            out = V4L2_PIX_FMT_RGB565;
++            return true;
++        case PIXFORMAT_YUV422:
++            out = V4L2_PIX_FMT_YUYV;  // YUV422 is actually YUYV format
++            return true;
++        case PIXFORMAT_YUV420:
++            out = V4L2_PIX_FMT_YUV420;
++            return true;
++        case PIXFORMAT_GRAYSCALE:
++            out = V4L2_PIX_FMT_GREY;
++            return true;
++        case PIXFORMAT_JPEG:
++            out = V4L2_PIX_FMT_JPEG;
++            return true;
++        case PIXFORMAT_RGB888:
++            out = V4L2_PIX_FMT_RGB24;
++            return true;
++        default:
++            return false;
++    }
++}
++
++std::expected<std::string, std::string> Esp32Camera::GetJpeg(int quality) {
++    if (current_fb_ == nullptr) {
++        return std::unexpected("No camera frame captured");
++    }
++    if (current_fb_->format == PIXFORMAT_JPEG) {
++        return std::string(reinterpret_cast<const char*>(current_fb_->buf), current_fb_->len);
++    }
++
++    v4l2_pix_fmt_t enc_fmt;
++    if (!ToV4l2Format(current_fb_->format, enc_fmt)) {
++        return std::unexpected("Unsupported pixel format");
++    }
++
++    // Use encode buffer for RGB565 (byte order fixed in Capture), otherwise the frame buffer
++    uint8_t* src = current_fb_->buf;
++    size_t src_len = current_fb_->len;
++    if (current_fb_->format == PIXFORMAT_RGB565 && encode_buf_ != nullptr) {
++        src = encode_buf_;
++        src_len = encode_buf_size_;
++    }
++
++    uint8_t* jpeg = nullptr;
++    size_t jpeg_len = 0;
++    if (!image_to_jpeg(src, src_len, current_fb_->width, current_fb_->height, enc_fmt,
++                       static_cast<uint8_t>(quality), &jpeg, &jpeg_len) ||
++        jpeg == nullptr) {
++        return std::unexpected("Failed to encode image to JPEG");
++    }
++    std::string result(reinterpret_cast<const char*>(jpeg), jpeg_len);
++    free(jpeg);
++    return result;
++}
++
+ std::expected<std::string, std::string> Esp32Camera::Explain(const std::string& question) {
+     if (explain_url_.empty()) {
+         return std::unexpected("Image explain URL or token is not set");
+@@ -196,28 +254,9 @@ std::expected<std::string, std::string> Esp32Camera::Explain(const std::string&
+         uint16_t w = current_fb_->width;
+         uint16_t h = current_fb_->height;
+         v4l2_pix_fmt_t enc_fmt;
+-        switch (current_fb_->format) {
+-            case PIXFORMAT_RGB565:
+-                enc_fmt = V4L2_PIX_FMT_RGB565;
+-                break;
+-            case PIXFORMAT_YUV422:
+-                enc_fmt = V4L2_PIX_FMT_YUYV;  // YUV422 is actually YUYV format
+-                break;
+-            case PIXFORMAT_YUV420:
+-                enc_fmt = V4L2_PIX_FMT_YUV420;
+-                break;
+-            case PIXFORMAT_GRAYSCALE:
+-                enc_fmt = V4L2_PIX_FMT_GREY;
+-                break;
+-            case PIXFORMAT_JPEG:
+-                enc_fmt = V4L2_PIX_FMT_JPEG;
+-                break;
+-            case PIXFORMAT_RGB888:
+-                enc_fmt = V4L2_PIX_FMT_RGB24;
+-                break;
+-            default:
+-                ESP_LOGE(TAG, "Unsupported pixel format: %d", current_fb_->format);
+-                return;
++        if (!ToV4l2Format(current_fb_->format, enc_fmt)) {
++            ESP_LOGE(TAG, "Unsupported pixel format: %d", current_fb_->format);
++            return;
+         }
+ 
+         // Use encode buffer for RGB565, otherwise use original frame buffer
+diff --git a/main/boards/common/esp32_camera.h b/main/boards/common/esp32_camera.h
+index e3c73e7..09a504a 100644
+--- a/main/boards/common/esp32_camera.h
++++ b/main/boards/common/esp32_camera.h
+@@ -39,4 +39,5 @@ public:
+     virtual bool SetVFlip(bool enabled) override;
+     virtual bool SetSwapBytes(bool enabled) override;
+     virtual std::expected<std::string, std::string> Explain(const std::string& question) override;
++    virtual std::expected<std::string, std::string> GetJpeg(int quality) override;
+ };
+diff --git a/main/boards/common/wifi_board.h b/main/boards/common/wifi_board.h
+index 7ee973c..72ca51a 100644
+--- a/main/boards/common/wifi_board.h
++++ b/main/boards/common/wifi_board.h
+@@ -59,6 +59,11 @@ public:
+      * Enter WiFi configuration mode (thread-safe, can be called from any task)
+      */
+     void EnterWifiConfigMode();
++    // Same thing without the boot button, e.g. from the Telegram /wifi command
++    virtual bool StartNetworkConfiguration() override {
++        EnterWifiConfigMode();
++        return true;
++    }
+     
+     /**
+      * Check if in WiFi config mode
+diff --git a/main/display/lcd_display.cc b/main/display/lcd_display.cc
+index 3462ac0..97f7880 100644
+--- a/main/display/lcd_display.cc
++++ b/main/display/lcd_display.cc
+@@ -1100,12 +1100,15 @@ void LcdDisplay::SetChatMessage(const char* role, const char* content) {
+     }
+     lv_anim_delete(chat_message_label_, nullptr);
+     lv_label_set_text(chat_message_label_, content);
+-    // Show bottom_bar_ only when there is content (and subtitle is not globally hidden)
++    // Show bottom_bar_ only when there is content. Hidden subtitles hide the conversation,
++    // but system messages (activation code, errors, alerts) stay visible.
+     if (bottom_bar_ != nullptr) {
+-        if (content == nullptr || content[0] == '\0') {
+-            lv_obj_add_flag(bottom_bar_, LV_OBJ_FLAG_HIDDEN);
+-        } else if (!hide_subtitle_) {
++        bool has_content = content != nullptr && content[0] != '\0';
++        bool is_system = role != nullptr && std::string_view(role) == "system";
++        if (has_content && (!hide_subtitle_ || is_system)) {
+             lv_obj_remove_flag(bottom_bar_, LV_OBJ_FLAG_HIDDEN);
++        } else {
++            lv_obj_add_flag(bottom_bar_, LV_OBJ_FLAG_HIDDEN);
+         }
+     }
+ #if CONFIG_USE_MULTILINE_CHAT_MESSAGE
+diff --git a/main/display/lvgl_display/lvgl_display.cc b/main/display/lvgl_display/lvgl_display.cc
+index 12a887e..9324c16 100644
+--- a/main/display/lvgl_display/lvgl_display.cc
++++ b/main/display/lvgl_display/lvgl_display.cc
+@@ -272,17 +272,33 @@ void LvglDisplay::UpdateStatusBar(bool update_all) {
+                                     LV_OBJ_FLAG_HIDDEN)) {  // Show if low battery popup is hidden
+                     lv_obj_remove_flag(low_battery_popup_, LV_OBJ_FLAG_HIDDEN);
+                     app.Schedule([&app]() { app.PlaySound(Lang::Sounds::OGG_LOW_BATTERY); });
++                    low_battery_ = true;
++                    if (app.GetDeviceState() == kDeviceStateIdle) {
++                        SetEmotion("sleepy");
++                    }
+                 }
+             } else {
+                 // Hide the low battery popup when the battery is not empty
+                 if (!lv_obj_has_flag(low_battery_popup_,
+                                      LV_OBJ_FLAG_HIDDEN)) {  // Hide if low battery popup is shown
+                     lv_obj_add_flag(low_battery_popup_, LV_OBJ_FLAG_HIDDEN);
++                    low_battery_ = false;
++                    if (app.GetDeviceState() == kDeviceStateIdle) {
++                        SetEmotion("neutral");
++                    }
+                 }
+             }
+         }
+     }
+ 
++    // Going idle resets the emoji to "neutral", so put the sleepy face back.
++    // Only on the transition: SetEmotion() restarts the animation every call.
++    bool idle_now = app.GetDeviceState() == kDeviceStateIdle;
++    if (low_battery_ && idle_now && !was_idle_) {
++        SetEmotion("sleepy");
++    }
++    was_idle_ = idle_now;
++
+     // Update network icon every 10 seconds
+     static int seconds_counter = 0;
+     if (update_all || seconds_counter++ % 10 == 0) {
+diff --git a/main/display/lvgl_display/lvgl_display.h b/main/display/lvgl_display/lvgl_display.h
+index 465e020..ecf3d36 100644
+--- a/main/display/lvgl_display/lvgl_display.h
++++ b/main/display/lvgl_display/lvgl_display.h
+@@ -48,6 +48,8 @@ protected:
+     const char* battery_icon_ = nullptr;
+     const char* network_icon_ = nullptr;
+     bool muted_ = false;
++    bool low_battery_ = false;  // Sleepy face while the battery is nearly empty
++    bool was_idle_ = false;
+ 
+     std::chrono::system_clock::time_point last_status_update_time_;
+     esp_timer_handle_t notification_timer_ = nullptr;
+diff --git a/main/main.cc b/main/main.cc
+index f7e8bc3..97765c3 100755
+--- a/main/main.cc
++++ b/main/main.cc
+@@ -10,6 +10,7 @@
+ #include "application.h"
+ 
+ #define TAG "main"
++//nem
+ 
+ extern "C" void app_main(void)
+ {
+diff --git a/main/settings.cc b/main/settings.cc
+index 3b40622..4271e2e 100644
+--- a/main/settings.cc
++++ b/main/settings.cc
+@@ -1,5 +1,6 @@
+ #include "settings.h"
+ 
++
+ #include <esp_log.h>
+ #include <nvs_flash.h>
+ 
+diff --git a/scripts/build_default_assets.py b/scripts/build_default_assets.py
+index f6a37d2..d04f8ee 100755
+--- a/scripts/build_default_assets.py
++++ b/scripts/build_default_assets.py
+@@ -775,10 +775,14 @@ def get_emoji_collection_path(default_emoji_collection, noto_fonts_path, project
+     Supports:
+     - PNG emoji collections from noto-fonts (e.g., noto-color-emoji_32)
+     - Otto GIF emoji collection (otto-gif)
++    - A directory of <emotion>.png/.gif files (CONFIG_DEFAULT_ASSETS_EMOJI_DIR)
+     """
+     if not default_emoji_collection:
+         return None
+-    
++
++    if os.path.isdir(default_emoji_collection):
++        return default_emoji_collection
++
+     # Special handling for otto-gif collection
+     if default_emoji_collection == 'otto-gif':
+         if project_root:
